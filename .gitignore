@@ -1,0 +1,8 @@
+# signing material - never commit
+*.key
+*.csr
+*.cer
+*.pem
+*.p12
+*.p8
+*.b64
