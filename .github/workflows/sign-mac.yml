@@ -1,63 +1,16 @@
 name: Sign macOS
 
-# push: CONSULO-BUILD.txt contains build number, committed by hub after Jenkins finished deploy session
-# manual: build from input, or latest release with mac archives - never deployed (for testing)
+# CONSULO-BUILD.txt contains build number, each change of it - signs that build
+# "SNAPSHOT" - signs latest release with mac archives, but never uploads to hub (dmg only in workflow artifacts)
+# manual run - signs build from CONSULO-BUILD.txt again
 on:
   push:
     branches: [ master ]
     paths: [ CONSULO-BUILD.txt ]
   workflow_dispatch:
-    inputs:
-      build:
-        description: 'Build number (empty - latest release)'
-        required: false
-        default: ''
 
 jobs:
-  resolve:
-    runs-on: ubuntu-latest
-    outputs:
-      build: ${{ steps.build.outputs.build }}
-      deploy: ${{ steps.build.outputs.deploy }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve build number
-        id: build
-        env:
-          GH_TOKEN: ${{ github.token }}
-          INPUT_BUILD: ${{ inputs.build }}
-          DEPLOY_ENABLED: ${{ vars.HUB_DEPLOY_ENABLED }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
-            BUILD=$(tr -d '[:space:]' < CONSULO-BUILD.txt)
-          elif [ -n "$INPUT_BUILD" ]; then
-            BUILD=$INPUT_BUILD
-          else
-            BUILD=$(gh api 'repos/consulo/consulo/releases?per_page=50' --jq '[.[]
-              | select(.draft | not)
-              | select(.tag_name | test("^consulo#[0-9]+$"))
-              | select(any(.assets[]; .name | startswith("consulo.dist.macA64_")) and any(.assets[]; .name | startswith("consulo.dist.mac64_")))
-              | .tag_name | ltrimstr("consulo#") | tonumber] | max')
-          fi
-
-          if ! [[ "$BUILD" =~ ^[0-9]+$ ]]; then
-            echo "::error::Bad build number: '$BUILD'"
-            exit 1
-          fi
-
-          # deploy only real builds, and only when hub supports it
-          DEPLOY=false
-          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$DEPLOY_ENABLED" = true ]; then
-            DEPLOY=true
-          fi
-
-          echo "Build: $BUILD, deploy: $DEPLOY"
-          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
-          echo "deploy=$DEPLOY" >> "$GITHUB_OUTPUT"
-
   mac:
-    needs: resolve
     runs-on: macos-latest
     timeout-minutes: 90
     strategy:
@@ -66,12 +19,35 @@ jobs:
         variant: [ mac64, macA64 ]
     env:
       VARIANT: ${{ matrix.variant }}
-      BUILD: ${{ needs.resolve.outputs.build }}
       # hub cuts last extension for id: consulo.dist.macA64.dmg.dmg -> consulo.dist.macA64.dmg
       DMG_FILE: consulo.dist.${{ matrix.variant }}.dmg.dmg
       HUB_DEPLOY_URL: ${{ vars.HUB_DEPLOY_URL || 'https://api.consulo.io/repository/platformDeploy' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Read build number
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VALUE=$(tr -d '[:space:]' < CONSULO-BUILD.txt)
+          SNAPSHOT=false
+          if [ "$VALUE" = SNAPSHOT ]; then
+            SNAPSHOT=true
+            BUILD=$(gh api 'repos/consulo/consulo/releases?per_page=50' --jq '[.[]
+              | select(.draft | not)
+              | select(.tag_name | test("^consulo#[0-9]+$"))
+              | select(any(.assets[]; .name | startswith("consulo.dist.macA64_")) and any(.assets[]; .name | startswith("consulo.dist.mac64_")))
+              | .tag_name | ltrimstr("consulo#") | tonumber] | max')
+          else
+            BUILD=$VALUE
+          fi
+          if ! [[ "$BUILD" =~ ^[0-9]+$ ]]; then
+            echo "::error::Bad value in CONSULO-BUILD.txt: '$VALUE' (build '$BUILD'), expected build number or SNAPSHOT"
+            exit 1
+          fi
+          echo "Build: $BUILD, snapshot: $SNAPSHOT"
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
+          echo "SNAPSHOT=$SNAPSHOT" >> "$GITHUB_ENV"
 
       - name: Import signing certificate
         env:
@@ -139,7 +115,7 @@ jobs:
           NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
         run: ./macos/sign-mac.sh "$RUNNER_TEMP/unsigned.tar.gz" out "$DMG_FILE"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: consulo.dist.${{ matrix.variant }}.dmg_${{ env.BUILD }}
           path: out/*
@@ -148,7 +124,8 @@ jobs:
       # new id for existing build - hub puts it in same channels as consulo.dist.<variant> of this build
       # and attaches to existing github release consulo#BUILD
       - name: Deploy to hub
-        if: needs.resolve.outputs.deploy == 'true'
+        # deploy only when hub supports dmg ids, and never for snapshot
+        if: vars.HUB_DEPLOY_ENABLED == 'true' && env.SNAPSHOT != 'true'
         env:
           HUB_DEPLOY_USER: ${{ secrets.HUB_DEPLOY_USER }}
           HUB_DEPLOY_PASSWORD: ${{ secrets.HUB_DEPLOY_PASSWORD }}
