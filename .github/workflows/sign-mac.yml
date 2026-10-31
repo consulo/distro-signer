@@ -111,6 +111,27 @@ jobs:
       - name: Download unsigned build
         run: curl -fL --retry 3 -o "$RUNNER_TEMP/unsigned.tar.gz" "https://github.com/consulo/consulo/releases/download/consulo%23$BUILD/consulo.dist.${VARIANT}_$BUILD.tar.gz"
 
+      # TEMP: codesign treats any file directly in Contents/ as nested code ("code object is not signed at all").
+      # Launcher reads Contents/consulo.properties and Contents/consulo.vmoptions - move them to Resources/
+      # and keep symlinks. Remove after launchers read them from Resources/ (and user home)
+      - name: Relocate Contents files (temporary)
+        run: |
+          DIR="$RUNNER_TEMP/relocate"
+          mkdir -p "$DIR"
+          tar -xzf "$RUNNER_TEMP/unsigned.tar.gz" -C "$DIR"
+          for f in "$DIR"/*.app/Contents/*; do
+            [ -f "$f" ] && [ ! -L "$f" ] || continue
+            name=$(basename "$f")
+            case "$name" in Info.plist|PkgInfo) continue ;; esac
+            resources="$(dirname "$f")/Resources"
+            mkdir -p "$resources"
+            mv "$f" "$resources/$name"
+            ln -s "Resources/$name" "$f"
+            echo "Contents/$name -> Contents/Resources/$name"
+          done
+          (cd "$DIR" && COPYFILE_DISABLE=1 tar -czf "$RUNNER_TEMP/unsigned.tar.gz" *)
+          rm -rf "$DIR"
+
       - name: Sign, notarize, staple
         env:
           MAC_SIGN_IDENTITY: ${{ secrets.MAC_SIGN_IDENTITY }}
